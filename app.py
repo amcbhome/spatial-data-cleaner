@@ -15,10 +15,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# GitHub Raw File Path (Default Data Source)
-DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/salt-bin-mapper/main/data/salt_bins.geojson"
+# --- Raw GitHub Dataset URL ---
+DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
-# --- Reference Lookups ---
+# --- ONS Centroid Lookup Table ---
 ONS_LA_CENTROIDS = {
     "W06000024": (51.7480, -3.3780),  # Merthyr Tydfil
     "E06000001": (54.6860, -1.2130),  # Hartlepool
@@ -49,7 +49,7 @@ def clean_geospatial_pipeline(
     invalid_dropped = metrics["initial_count"] - len(df_clean)
     metrics["invalid_geom_dropped"] = invalid_dropped
     metrics["steps_log"].append(
-        f"**1. Geometry Check:** Checked spatial features. Filtered `{invalid_dropped}` null/invalid geometries."
+        f"**1. Geometry Check:** Validated spatial features. Filtered `{invalid_dropped}` null or invalid geometries."
     )
 
     # 2. Deduplication
@@ -58,14 +58,14 @@ def clean_geospatial_pipeline(
     duplicates_dropped = pre_dedup - len(df_clean)
     metrics["duplicates_dropped"] = duplicates_dropped
     metrics["steps_log"].append(
-        f"**2. Deduplication:** Identified and dropped `{duplicates_dropped}` exact duplicate records."
+        f"**2. Deduplication:** Identified and dropped `{duplicates_dropped}` exact duplicate records across all columns."
     )
 
     # 3. CRS Alignment
     if df_clean.crs is None:
         df_clean.set_crs("EPSG:4326", inplace=True)
         metrics["steps_log"].append(
-            "**3. CRS Alignment:** Defaulted missing spatial reference to `EPSG:4326` (WGS84)."
+            "**3. CRS Alignment:** Unspecified spatial reference system detected. Defaulted to `EPSG:4326` (WGS84)."
         )
 
     df_clean = df_clean.to_crs(target_crs)
@@ -83,7 +83,7 @@ def clean_geospatial_pipeline(
         out_of_bounds_dropped = pre_bounds - len(df_clean)
         metrics["out_of_bounds_dropped"] = out_of_bounds_dropped
         metrics["steps_log"].append(
-            f"**4. Spatial Bounding:** Validated coordinates against British National Grid extents. Removed `{out_of_bounds_dropped}` out-of-bounds records."
+            f"**4. Spatial Bounding:** Checked coordinates against British National Grid extents. Removed `{out_of_bounds_dropped}` out-of-bounds records."
         )
     else:
         metrics["out_of_bounds_dropped"] = 0
@@ -105,17 +105,17 @@ def clean_geospatial_pipeline(
                 )
 
     metrics["steps_log"].append(
-        "**5. Schema Normalisation:** Stripped whitespace and standardized text fields."
+        "**5. Schema Normalisation:** Stripped whitespace and standardized text fields to uppercase GSS codes and title case labels."
     )
     metrics["final_count"] = len(df_clean)
 
     return df_clean, metrics
 
 
-# --- Data Loader ---
+# --- Cached Data Loaders ---
 @st.cache_data
-def load_data_from_url(url: str):
-    return gpd.read_file(url)
+def load_csv_from_url(url: str) -> pd.DataFrame:
+    return pd.read_csv(url)
 
 
 # --- Sidebar Setup ---
@@ -123,7 +123,7 @@ st.sidebar.title("🛠️ Control Panel")
 
 data_source = st.sidebar.radio(
     "Data Source",
-    ["Hosted GitHub Dataset", "Upload Custom File"],
+    ["GitHub Public EV Dataset", "Upload Custom File"],
     index=0,
 )
 
@@ -146,86 +146,17 @@ map_mode = st.sidebar.radio(
 )
 
 # --- Header Section ---
-st.title("🗺️ Geospatial Infrastructure & Regional Analytics")
+st.title("🗺️ DfT Public EV Charging Infrastructure Pipeline")
 st.caption(
     "Interactive Reproducible Analytical Pipeline (RAP) demonstrating automated cleaning, spatial mapping, and regional statistical summaries."
 )
 
-# --- Ingestion ---
+# --- Ingestion & Parsing ---
 try:
     if uploaded_file is not None:
         file_ext = uploaded_file.name.split(".")[-1].lower()
         if file_ext == "csv":
             df_raw = pd.read_csv(uploaded_file)
-            cols_lower = {col.lower(): col for col in df_raw.columns}
-            found_lat = next(
-                (
-                    cols_lower[c]
-                    for c in ["latitude", "lat", "y"]
-                    if c in cols_lower
-                ),
-                None,
-            )
-            found_lon = next(
-                (
-                    cols_lower[c]
-                    for c in ["longitude", "long", "lon", "x"]
-                    if c in cols_lower
-                ),
-                None,
-            )
-            code_col = next(
-                (
-                    cols_lower[c]
-                    for c in ["areacd", "ladcd", "area_code"]
-                    if c in cols_lower
-                ),
-                None,
-            )
-
-            if found_lat and found_lon:
-                df_raw[found_lat] = pd.to_numeric(
-                    df_raw[found_lat], errors="coerce"
-                )
-                df_raw[found_lon] = pd.to_numeric(
-                    df_raw[found_lon], errors="coerce"
-                )
-                df_raw = df_raw.dropna(subset=[found_lat, found_lon])
-                raw_gdf = gpd.GeoDataFrame(
-                    df_raw,
-                    geometry=gpd.points_from_xy(
-                        df_raw[found_lon], df_raw[found_lat]
-                    ),
-                    crs="EPSG:4326",
-                )
-            elif code_col:
-                df_raw["areacd_clean"] = (
-                    df_raw[code_col].astype(str).str.upper()
-                )
-                df_raw["latitude"] = df_raw["areacd_clean"].map(
-                    lambda x: (
-                        ONS_LA_CENTROIDS[x][0]
-                        if x in ONS_LA_CENTROIDS
-                        else 52.5
-                    )
-                )
-                df_raw["longitude"] = df_raw["areacd_clean"].map(
-                    lambda x: (
-                        ONS_LA_CENTROIDS[x][1]
-                        if x in ONS_LA_CENTROIDS
-                        else -1.5
-                    )
-                )
-                raw_gdf = gpd.GeoDataFrame(
-                    df_raw,
-                    geometry=gpd.points_from_xy(
-                        df_raw["longitude"], df_raw["latitude"]
-                    ),
-                    crs="EPSG:4326",
-                )
-            else:
-                st.error("Could not parse coordinates or area codes.")
-                st.stop()
         else:
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=f".{file_ext}"
@@ -234,7 +165,58 @@ try:
                 tmp_path = tmp.name
             raw_gdf = gpd.read_file(tmp_path)
     else:
-        raw_gdf = load_data_from_url(DEFAULT_GITHUB_URL)
+        df_raw = load_csv_from_url(DEFAULT_GITHUB_URL)
+        file_ext = "csv"
+
+    if file_ext == "csv":
+        cols_lower = {col.lower(): col for col in df_raw.columns}
+        found_lat = next(
+            (cols_lower[c] for c in ["latitude", "lat", "y"] if c in cols_lower),
+            None,
+        )
+        found_lon = next(
+            (cols_lower[c] for c in ["longitude", "long", "lon", "x"] if c in cols_lower),
+            None,
+        )
+        code_col = next(
+            (
+                cols_lower[c]
+                for c in ["areacd", "ladcd", "area_code", "gss_code", "lad23cd"]
+                if c in cols_lower
+            ),
+            None,
+        )
+
+        if found_lat and found_lon:
+            df_raw[found_lat] = pd.to_numeric(df_raw[found_lat], errors="coerce")
+            df_raw[found_lon] = pd.to_numeric(df_raw[found_lon], errors="coerce")
+            df_raw = df_raw.dropna(subset=[found_lat, found_lon])
+            raw_gdf = gpd.GeoDataFrame(
+                df_raw,
+                geometry=gpd.points_from_xy(
+                    df_raw[found_lon], df_raw[found_lat]
+                ),
+                crs="EPSG:4326",
+            )
+        elif code_col:
+            st.toast(f"Matched area code column `{code_col}`. Applying ONS geographic lookup.", icon="📍")
+            df_raw["areacd_clean"] = df_raw[code_col].astype(str).str.upper()
+            df_raw["latitude"] = df_raw["areacd_clean"].map(
+                lambda x: ONS_LA_CENTROIDS[x][0] if x in ONS_LA_CENTROIDS else 52.5
+            )
+            df_raw["longitude"] = df_raw["areacd_clean"].map(
+                lambda x: ONS_LA_CENTROIDS[x][1] if x in ONS_LA_CENTROIDS else -1.5
+            )
+            raw_gdf = gpd.GeoDataFrame(
+                df_raw,
+                geometry=gpd.points_from_xy(
+                    df_raw["longitude"], df_raw["latitude"]
+                ),
+                crs="EPSG:4326",
+            )
+        else:
+            st.error(f"Could not parse coordinates or area codes. Headers found: `{list(df_raw.columns)}`")
+            st.stop()
 
     # Run Pipeline
     cleaned_gdf, metrics = clean_geospatial_pipeline(
@@ -252,7 +234,7 @@ try:
     m3.metric("Out of Bounds Dropped", f"{metrics['out_of_bounds_dropped']:,}")
     m4.metric("Valid Production Records", f"{metrics['final_count']:,}")
 
-    with st.expander("🔍 View Step-by-Step Data Quality Log"):
+    with st.expander("🔍 View Step-by-Step Data Quality Log", expanded=False):
         for step in metrics["steps_log"]:
             st.markdown(f"- {step}")
 
@@ -263,7 +245,7 @@ try:
     # ==========================================
     st.subheader("2. Interactive Regional Statistical Summary")
 
-    # Identify potential region/area grouping columns dynamically
+    # Identify area grouping columns dynamically
     group_cols = [
         c
         for c in cleaned_gdf.select_dtypes(include=["object"]).columns
@@ -276,11 +258,11 @@ try:
     if group_cols:
         col_select1, col_select2 = st.columns([1, 2])
         with col_select1:
-            region_col = st.selectbox("Select Regional Category", group_cols)
+            region_col = st.selectbox("Select Filter Column", group_cols)
             region_list = ["All Regions"] + sorted(
                 list(cleaned_gdf[region_col].unique())
             )
-            selected_region = st.selectbox("Filter Specific Region", region_list)
+            selected_region = st.selectbox("Filter Specific Value", region_list)
 
         if selected_region != "All Regions":
             filtered_gdf = cleaned_gdf[
@@ -290,13 +272,17 @@ try:
         with col_select2:
             s1, s2, s3 = st.columns(3)
             s1.metric(
-                "Region Record Count",
+                "Selected Area Count",
                 f"{len(filtered_gdf):,}",
-                delta=f"{len(filtered_gdf) / len(cleaned_gdf):.1%} of total",
+                delta=f"{len(filtered_gdf) / len(cleaned_gdf):.1%} of total dataset",
             )
 
-            # If numerical values exist, summarize them
-            num_cols = filtered_gdf.select_dtypes(include=["number"]).columns
+            # Summarize numeric values if present (e.g., charger counts or values)
+            num_cols = [
+                c
+                for c in filtered_gdf.select_dtypes(include=["number"]).columns
+                if c.lower() not in ["latitude", "longitude", "lat", "lon"]
+            ]
             if len(num_cols) > 0:
                 s2.metric(
                     f"Mean {num_cols[0].title()}",
@@ -307,8 +293,8 @@ try:
                     f"{filtered_gdf[num_cols[0]].sum():,.0f}",
                 )
             else:
-                s2.metric("Spatial Geometry Type", "Point")
-                s3.metric("CRS Code", target_crs)
+                s2.metric("Target Coordinate System", target_crs)
+                s3.metric("Spatial Feature Type", "Point")
 
     st.markdown("---")
 
@@ -338,7 +324,7 @@ try:
                 marker_cluster = MarkerCluster().add_to(m)
                 popup_cols = [
                     c for c in map_gdf.columns if c not in ["geometry"]
-                ][:4]
+                ][:5]
 
                 for idx, row in point_gdf.head(1500).iterrows():
                     popup_html = "<br>".join(
@@ -360,11 +346,11 @@ try:
             st_folium(m, use_container_width=True, height=450)
 
     with col_chart:
-        st.markdown(f"**Data Preview ({selected_region})**")
+        st.markdown(f"**Cleaned Records Table ({selected_region})**")
         st.dataframe(
             filtered_gdf.drop(columns="geometry", errors="ignore").head(50),
             use_container_width=True,
-            height=220,
+            height=250,
         )
 
         geojson_bytes = filtered_gdf.to_crs("EPSG:4326").to_json()
