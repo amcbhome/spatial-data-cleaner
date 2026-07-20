@@ -17,6 +17,25 @@ st.set_page_config(
 # --- Raw GitHub Dataset URL ---
 DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
+# --- Plain English Label Dictionary ---
+LABEL_MAP = {
+    "areacd": "Area Code",
+    "ladcd": "Area Code",
+    "gss_code": "Area Code",
+    "area_code": "Area Code",
+    "lad23cd": "Area Code",
+    "areanm": "Local Authority Name",
+    "ladnm": "Local Authority Name",
+    "ladnmw": "Welsh Local Authority Name",
+    "region": "Region / Nation",
+    "period": "Year / Time Period",
+    "value": "Total Charging Devices",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "lat": "Latitude",
+    "lon": "Longitude",
+}
+
 # --- ONS Centroid Lookup Table ---
 ONS_LA_CENTROIDS = {
     "W06000024": (51.7480, -3.3780),  # Merthyr Tydfil
@@ -33,6 +52,12 @@ ONS_LA_CENTROIDS = {
     "S12000049": (55.9533, -3.1883),  # Edinburgh
     "W06000015": (51.6214, -3.9436),  # Swansea
 }
+
+
+def get_friendly_label(col_name: str) -> str:
+    """Translates technical database headers to plain English labels."""
+    col_lower = col_name.lower().strip()
+    return LABEL_MAP.get(col_lower, col_name.replace("_", " ").title())
 
 
 @st.cache_data
@@ -124,24 +149,32 @@ try:
         st.error("Could not locate point coordinates or area codes in the dataset.")
         st.stop()
 
+    # Create mapping of Raw Header -> Plain English Label
+    friendly_cols_map = {col: get_friendly_label(col) for col in gdf.columns if col != "geometry"}
+
     # --- Interactive Filtering Bar ---
     group_cols = [
-        c for c in gdf.select_dtypes(include=["object"]).columns if c != "geometry"
+        c for c in gdf.select_dtypes(include=["object"]).columns if c != "geometry" and c != "areacd_clean"
     ]
 
     col_f1, col_f2 = st.columns([1, 2])
 
     if group_cols:
         with col_f1:
-            filter_attribute = st.selectbox("Categorical Feature", group_cols)
-        with col_f2:
-            unique_vals = ["All Regions / Categories"] + sorted(
-                list(gdf[filter_attribute].unique())
+            # Display plain language names in the dropdown selection
+            selected_raw_attribute = st.selectbox(
+                "Filter Category",
+                group_cols,
+                format_func=lambda x: friendly_cols_map.get(x, x),
             )
-            selected_val = st.selectbox("Interactive Filter", unique_vals)
+        with col_f2:
+            unique_vals = ["All Locations / Categories"] + sorted(
+                list(gdf[selected_raw_attribute].unique())
+            )
+            selected_val = st.selectbox("Select Specific Region or Value", unique_vals)
 
-        if selected_val != "All Regions / Categories":
-            filtered_gdf = gdf[gdf[filter_attribute] == selected_val]
+        if selected_val != "All Locations / Categories":
+            filtered_gdf = gdf[gdf[selected_raw_attribute] == selected_val]
         else:
             filtered_gdf = gdf.copy()
     else:
@@ -155,13 +188,13 @@ try:
 
     # --- 1. Interactive Spatial Map ---
     with col_map:
-        st.subheader("🗺️ Geographic Infrastructure Distribution")
+        st.subheader("🗺️ Geographic Charging Point Locations")
 
         if not filtered_gdf.empty:
             centroid = [filtered_gdf.geometry.y.mean(), filtered_gdf.geometry.x.mean()]
             m = folium.Map(
                 location=centroid,
-                zoom_start=9 if selected_val != "All Regions / Categories" else 6,
+                zoom_start=9 if selected_val != "All Locations / Categories" else 6,
                 tiles=map_style,
                 control_scale=True,
             )
@@ -176,14 +209,14 @@ try:
             else:
                 marker_cluster = MarkerCluster().add_to(m)
                 popup_cols = [
-                    c for c in filtered_gdf.columns if c not in ["geometry"]
+                    c for c in filtered_gdf.columns if c not in ["geometry", "areacd_clean", "latitude", "longitude"]
                 ][:4]
 
                 for idx, row in point_gdf.head(1500).iterrows():
                     popup_html = "<div style='font-family: sans-serif; font-size: 12px;'>"
                     popup_html += "".join(
                         [
-                            f"<b>{col.title()}:</b> {row[col]}<br>"
+                            f"<b>{friendly_cols_map.get(col, col)}:</b> {row[col]}<br>"
                             for col in popup_cols
                         ]
                     )
@@ -208,19 +241,20 @@ try:
         # Visual Chart 1: Bar Chart breakdown
         if group_cols:
             cat_counts = (
-                filtered_gdf[filter_attribute]
+                filtered_gdf[selected_raw_attribute]
                 .value_counts()
                 .head(10)
                 .reset_index()
             )
-            cat_counts.columns = [filter_attribute, "Device Count"]
+            friendly_name = friendly_cols_map.get(selected_raw_attribute, selected_raw_attribute)
+            cat_counts.columns = [friendly_name, "Device Count"]
 
             fig_bar = px.bar(
                 cat_counts,
                 x="Device Count",
-                y=filter_attribute,
+                y=friendly_name,
                 orientation="h",
-                title=f"Top Features in '{filter_attribute}'",
+                title=f"Top 10 Locations by '{friendly_name}'",
                 color="Device Count",
                 color_continuous_scale=color_theme,
             )
@@ -231,17 +265,22 @@ try:
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # Visual Chart 2: Sunburst / Donut proportional breakdown
+        # Visual Chart 2: Donut Chart breakdown
         if len(group_cols) > 1:
             sec_col = (
                 group_cols[1]
-                if group_cols[1] != filter_attribute
+                if group_cols[1] != selected_raw_attribute
                 else group_cols[0]
             )
+            friendly_sec_name = friendly_cols_map.get(sec_col, sec_col)
+            
+            # Temporarily rename columns for chart legend readability
+            pie_data = filtered_gdf.head(200).rename(columns=friendly_cols_map)
+            
             fig_pie = px.pie(
-                filtered_gdf.head(200),
-                names=sec_col,
-                title=f"Distribution by '{sec_col}'",
+                pie_data,
+                names=friendly_sec_name,
+                title=f"Proportional Share by '{friendly_sec_name}'",
                 hole=0.4,
                 color_discrete_sequence=px.colors.sequential.Blues_r,
             )
