@@ -5,3 +5,4 @@ shapely>=2.0.0
 folium>=0.15.0
 streamlit-folium>=0.18.0
 pyproj>=3.6.0
+plotly>=5.18.0
