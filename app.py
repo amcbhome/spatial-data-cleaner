@@ -17,7 +17,7 @@ st.set_page_config(
 # --- Raw GitHub Dataset URL ---
 DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
-# --- Plain English Label Dictionary ---
+# --- Plain English Label Dictionary (Year / Time Removed) ---
 LABEL_MAP = {
     "areacd": "Area Code",
     "ladcd": "Area Code",
@@ -28,7 +28,6 @@ LABEL_MAP = {
     "ladnm": "Local Authority Name",
     "ladnmw": "Welsh Local Authority Name",
     "region": "Region / Nation",
-    "period": "Year / Time Period",
     "value": "Total Charging Devices",
     "latitude": "Latitude",
     "longitude": "Longitude",
@@ -152,16 +151,16 @@ try:
     # Create mapping of Raw Header -> Plain English Label
     friendly_cols_map = {col: get_friendly_label(col) for col in gdf.columns if col != "geometry"}
 
-    # --- Interactive Filtering Bar ---
+    # --- Interactive Filtering Bar (Excludes period / time columns) ---
     group_cols = [
-        c for c in gdf.select_dtypes(include=["object"]).columns if c != "geometry" and c != "areacd_clean"
+        c for c in gdf.select_dtypes(include=["object"]).columns 
+        if c.lower() not in ["geometry", "areacd_clean", "period", "year", "time"]
     ]
 
     col_f1, col_f2 = st.columns([1, 2])
 
     if group_cols:
         with col_f1:
-            # Display plain language names in the dropdown selection
             selected_raw_attribute = st.selectbox(
                 "Filter Category",
                 group_cols,
@@ -209,7 +208,8 @@ try:
             else:
                 marker_cluster = MarkerCluster().add_to(m)
                 popup_cols = [
-                    c for c in filtered_gdf.columns if c not in ["geometry", "areacd_clean", "latitude", "longitude"]
+                    c for c in filtered_gdf.columns 
+                    if c.lower() not in ["geometry", "areacd_clean", "latitude", "longitude", "period", "year", "time"]
                 ][:4]
 
                 for idx, row in point_gdf.head(1500).iterrows():
@@ -274,7 +274,6 @@ try:
             )
             friendly_sec_name = friendly_cols_map.get(sec_col, sec_col)
             
-            # Temporarily rename columns for chart legend readability
             pie_data = filtered_gdf.head(200).rename(columns=friendly_cols_map)
             
             fig_pie = px.pie(
