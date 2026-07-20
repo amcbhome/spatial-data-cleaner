@@ -7,14 +7,16 @@ from streamlit_folium import st_folium
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Department for Transport EV Charging Explorer",
+    page_title="ONS Public EV Chargers Explorer",
     page_icon="⚡",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+# Raw ONS / DfT dataset URL
 DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
-# Centroid lookup for fallback area-code mapping
+# Centroid lookup for 9-character ONS GSS Area Codes (areacd)
 ONS_LA_CENTROIDS = {
     "W06000024": (51.7480, -3.3780),  # Merthyr Tydfil
     "E06000001": (54.6860, -1.2130),  # Hartlepool
@@ -37,11 +39,25 @@ def load_dataset(url: str) -> pd.DataFrame:
     return pd.read_csv(url)
 
 
-# --- Header Relevant to Dataset ---
-st.title("⚡ Department for Transport Public EV Charging Infrastructure Explorer")
+# --- Header & Dataset Context ---
+st.title("⚡ ONS Public Electric Vehicle Chargers Explorer")
 st.caption(
-    "Interactive spatial analytics dashboard for exploring public electric vehicle charging device distribution across UK local authorities."
+    "Source: Office for National Statistics (ONS) / Department for Transport (DfT) Explore Local Statistics Indicator"
 )
+
+# --- Dataset Field Context Box ---
+with st.expander("ℹ️ About This Dataset (Schema & Field Definitions)", expanded=True):
+    st.markdown("""
+    This application ingests the official 4-field ONS local indicator dataset on public electric vehicle chargers:
+    
+    | Field Name | Friendly Label | Description |
+    | :--- | :--- | :--- |
+    | **`areacd`** | Area Code | Official 9-character ONS GSS code (e.g. `E08000025`). |
+    | **`areanm`** | Area Name | Name of the UK Local Authority or Region (e.g. `Coventry`). |
+    | **`period`** | Time Period | Reporting period or quarter (e.g. `2024` or `Apr 2026`). |
+    | **`value`** | EV Charger Value | Recorded count or rate of public EV charging devices per local area. |
+    """)
+
 st.markdown("---")
 
 # --- Sidebar Controls ---
@@ -61,13 +77,12 @@ map_mode = st.sidebar.radio(
 try:
     df_raw = load_dataset(DEFAULT_GITHUB_URL)
 
-    # Detect region or local authority name column
+    # Detect area name column (`areanm`)
     areanm_col = next(
         (
             c
             for c in df_raw.columns
-            if c.lower()
-            in ["areanm", "ladnm", "local_authority_name", "region", "areacd"]
+            if c.lower() in ["areanm", "ladnm", "local_authority_name", "region", "areacd"]
         ),
         None,
     )
@@ -83,10 +98,10 @@ try:
                 break
 
         selected_region = st.selectbox(
-            "📍 Select Local Authority / Region:",
+            "📍 Select Local Authority / Region (`areanm`):",
             options=region_options,
             index=default_idx,
-            help="Selecting a region updates both the summary metrics and forces the map to re-center over that specific area code.",
+            help="Choose a region to inspect its ONS indicator values and re-center the map.",
         )
 
         filtered_df = df_raw[df_raw[areanm_col] == selected_region].copy()
@@ -94,7 +109,7 @@ try:
         selected_region = "All Regions"
         filtered_df = df_raw.copy()
 
-    # Parse spatial coordinates
+    # Detect area code column (`areacd`) or lat/lon coordinates
     cols_lower = {col.lower(): col for col in filtered_df.columns}
     found_lat = next(
         (cols_lower[c] for c in ["latitude", "lat", "y"] if c in cols_lower), None
@@ -113,24 +128,16 @@ try:
     )
 
     if found_lat and found_lon:
-        filtered_df[found_lat] = pd.to_numeric(
-            filtered_df[found_lat], errors="coerce"
-        )
-        filtered_df[found_lon] = pd.to_numeric(
-            filtered_df[found_lon], errors="coerce"
-        )
+        filtered_df[found_lat] = pd.to_numeric(filtered_df[found_lat], errors="coerce")
+        filtered_df[found_lon] = pd.to_numeric(filtered_df[found_lon], errors="coerce")
         filtered_df = filtered_df.dropna(subset=[found_lat, found_lon])
         gdf = gpd.GeoDataFrame(
             filtered_df,
-            geometry=gpd.points_from_xy(
-                filtered_df[found_lon], filtered_df[found_lat]
-            ),
+            geometry=gpd.points_from_xy(filtered_df[found_lon], filtered_df[found_lat]),
             crs="EPSG:4326",
         )
     elif code_col:
-        filtered_df["areacd_clean"] = (
-            filtered_df[code_col].astype(str).str.upper()
-        )
+        filtered_df["areacd_clean"] = filtered_df[code_col].astype(str).str.upper()
         filtered_df["latitude"] = filtered_df["areacd_clean"].map(
             lambda x: ONS_LA_CENTROIDS[x][0] if x in ONS_LA_CENTROIDS else 52.5
         )
@@ -139,9 +146,7 @@ try:
         )
         gdf = gpd.GeoDataFrame(
             filtered_df,
-            geometry=gpd.points_from_xy(
-                filtered_df["longitude"], filtered_df["latitude"]
-            ),
+            geometry=gpd.points_from_xy(filtered_df["longitude"], filtered_df["latitude"]),
             crs="EPSG:4326",
         )
     else:
@@ -149,41 +154,39 @@ try:
         st.stop()
 
     # --- Regional Profile Summary ---
-    st.markdown(f"### 📊 Summary Profile: **{selected_region}**")
+    st.markdown(f"### 📊 ONS Local Metrics: **{selected_region}**")
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Selected Region", str(selected_region))
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Area Name (`areanm`)", str(selected_region))
 
-    num_cols = [
-        c
-        for c in gdf.select_dtypes(include=["number"]).columns
-        if c.lower() not in ["latitude", "longitude", "lat", "lon"]
-    ]
+    # Display GSS Area Code
+    gss_val = gdf[code_col].iloc[0] if code_col and not gdf.empty else "N/A"
+    m2.metric("Area Code (`areacd`)", str(gss_val))
 
-    if num_cols:
-        m2.metric(
-            f"Total {num_cols[0].replace('_', ' ').title()}",
-            f"{gdf[num_cols[0]].sum():,.0f}",
-        )
-        m3.metric("Records Found", f"{len(gdf):,}")
+    # Display Period
+    period_col = next((cols_lower[c] for c in ["period", "year"] if c in cols_lower), None)
+    period_val = gdf[period_col].iloc[0] if period_col and not gdf.empty else "Latest"
+    m3.metric("Time Period (`period`)", str(period_val))
+
+    # Display Value
+    val_col = next((cols_lower[c] for c in ["value", "chargers"] if c in cols_lower), None)
+    if val_col:
+        m4.metric("EV Charger Metric (`value`)", f"{gdf[val_col].sum():,.1f}")
     else:
-        m2.metric("Mapped Locations", f"{len(gdf):,}")
-        m3.metric("Data Source", "DfT Public Dataset")
+        m4.metric("Mapped Locations", f"{len(gdf):,}")
 
     st.markdown("---")
 
-    # --- Interactive Map Section ---
+    # --- Interactive Map & Data Table ---
     col_map, col_table = st.columns([3, 2])
 
     with col_map:
-        st.subheader(f"🗺️ Charging Points in {selected_region}")
+        st.subheader(f"🗺️ Spatial Centroid Map for {selected_region}")
 
         if not gdf.empty:
-            # 1. Calculate new center coordinates dynamically
             lat_mean = float(gdf.geometry.y.mean())
             lon_mean = float(gdf.geometry.x.mean())
 
-            # 2. Build fresh map instance
             m = folium.Map(
                 location=[lat_mean, lon_mean],
                 zoom_start=11,
@@ -197,35 +200,20 @@ try:
                 HeatMap(coords, radius=18, blur=15, min_opacity=0.4).add_to(m)
             else:
                 marker_cluster = MarkerCluster().add_to(m)
-                popup_cols = [
-                    c
-                    for c in gdf.columns
-                    if c.lower()
-                    not in [
-                        "geometry",
-                        "latitude",
-                        "longitude",
-                        "period",
-                        "year",
-                    ]
-                ][:4]
-
                 for idx, row in gdf.head(1000).iterrows():
-                    popup_html = (
-                        "<div style='font-family: sans-serif; font-size: 12px;'>"
-                    )
-                    popup_html += f"<b>Region:</b> {selected_region}<br>"
-                    popup_html += "".join(
-                        [
-                            f"<b>{col.replace('_', ' ').title()}:</b> {row[col]}<br>"
-                            for col in popup_cols
-                        ]
-                    )
+                    popup_html = "<div style='font-family: sans-serif; font-size: 12px;'>"
+                    popup_html += f"<b>Area Name (areanm):</b> {selected_region}<br>"
+                    if code_col:
+                        popup_html += f"<b>Area Code (areacd):</b> {row[code_col]}<br>"
+                    if period_col:
+                        popup_html += f"<b>Time Period (period):</b> {row[period_col]}<br>"
+                    if val_col:
+                        popup_html += f"<b>Charger Metric (value):</b> {row[val_col]}<br>"
                     popup_html += "</div>"
 
                     folium.CircleMarker(
                         location=[row.geometry.y, row.geometry.x],
-                        radius=6,
+                        radius=7,
                         color="#005A9C",
                         fill=True,
                         fill_color="#0080FF",
@@ -233,31 +221,28 @@ try:
                         popup=folium.Popup(popup_html, max_width=250),
                     ).add_to(marker_cluster)
 
-            # 3. Force re-render on selection change using unique key
             st_folium(
                 m,
                 use_container_width=True,
-                height=500,
+                height=480,
                 key=f"map_render_{selected_region}",
             )
 
     with col_table:
-        st.subheader("📋 Region Data Inspection")
+        st.subheader("📋 Raw ONS Indicator Table")
 
-        preview_df = gdf.drop(
-            columns=["geometry", "areacd_clean"], errors="ignore"
-        )
+        display_df = gdf.drop(columns=["geometry", "areacd_clean", "latitude", "longitude"], errors="ignore")
         st.dataframe(
-            preview_df,
+            display_df,
             use_container_width=True,
-            height=380,
+            height=360,
         )
 
         geojson_bytes = gdf.to_crs("EPSG:4326").to_json()
         st.download_button(
-            label=f"📥 Export {selected_region} Data (GeoJSON)",
+            label=f"📥 Export {selected_region} GeoJSON",
             data=geojson_bytes,
-            file_name=f"{str(selected_region).lower().replace(' ', '_')}_ev_data.geojson",
+            file_name=f"{str(selected_region).lower().replace(' ', '_')}_ons_data.geojson",
             mime="application/geo+json",
             use_container_width=True,
         )
