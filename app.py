@@ -8,7 +8,7 @@ from streamlit_folium import st_folium
 
 # --- Page Setup ---
 st.set_page_config(
-    page_title="EV Charging Infrastructure Visualiser",
+    page_title="Public EV Charging Infrastructure Explorer",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -17,22 +17,15 @@ st.set_page_config(
 # --- Raw GitHub Dataset URL ---
 DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
-# --- Plain English Label Dictionary (Year / Time Removed) ---
+# --- Plain Language Mapping ---
 LABEL_MAP = {
     "areacd": "Area Code",
     "ladcd": "Area Code",
     "gss_code": "Area Code",
-    "area_code": "Area Code",
-    "lad23cd": "Area Code",
     "areanm": "Local Authority Name",
     "ladnm": "Local Authority Name",
-    "ladnmw": "Welsh Local Authority Name",
     "region": "Region / Nation",
     "value": "Total Charging Devices",
-    "latitude": "Latitude",
-    "longitude": "Longitude",
-    "lat": "Latitude",
-    "lon": "Longitude",
 }
 
 # --- ONS Centroid Lookup Table ---
@@ -53,59 +46,70 @@ ONS_LA_CENTROIDS = {
 }
 
 
-def get_friendly_label(col_name: str) -> str:
-    """Translates technical database headers to plain English labels."""
-    col_lower = col_name.lower().strip()
-    return LABEL_MAP.get(col_lower, col_name.replace("_", " ").title())
-
-
 @st.cache_data
 def load_dataset(url: str) -> pd.DataFrame:
     return pd.read_csv(url)
 
 
-# --- Header & Intro ---
-st.title("⚡ Public EV Charging Infrastructure Explorer")
-st.caption(
-    "Interactive spatial visualization of public electric vehicle charging infrastructure across the UK."
-)
-
-# --- Sidebar Visual Controls ---
-st.sidebar.title("🎨 Visual Controls")
-
+# --- Sidebar Map Controls ---
+st.sidebar.title("🎨 Map Controls")
 map_style = st.sidebar.selectbox(
     "Basemap Theme",
     ["CartoDB positron", "OpenStreetMap", "CartoDB dark_matter"],
     index=0,
-    help="Switch between light, dark, and standard terrain basemaps.",
 )
-
 map_mode = st.sidebar.radio(
-    "Spatial Overlay",
-    ["Clustered Markers", "Density Heatmap"],
+    "Spatial Display Mode",
+    ["Clustered Point Markers", "Density Heatmap"],
     index=0,
-    help="Cluster individual device points or view regional device density.",
 )
 
-heatmap_radius = 15
-if map_mode == "Density Heatmap":
-    heatmap_radius = st.sidebar.slider(
-        "Heatmap Point Radius", 5, 30, 15, help="Adjust visual density spread."
-    )
-
-st.sidebar.markdown("---")
-color_theme = st.sidebar.selectbox(
-    "Chart Palette",
-    ["Blues", "Viridis", "Plasma", "Plotly3"],
-    index=0,
-    help="Color scheme for analytical charts.",
-)
-
-# --- Load & Parse Data ---
+# --- Load Dataset ---
 try:
     df_raw = load_dataset(DEFAULT_GITHUB_URL)
 
-    cols_lower = {col.lower(): col for col in df_raw.columns}
+    # Detect area name column
+    areanm_col = next(
+        (
+            c
+            for c in df_raw.columns
+            if c.lower() in ["areanm", "ladnm", "local_authority_name", "region"]
+        ),
+        None,
+    )
+
+    # Page Header Relevant to Dataset
+    st.title("⚡ Department for Transport Public EV Charging Infrastructure Explorer")
+    st.caption(
+        "Interactive spatial dashboard for inspecting public electric vehicle charging device distribution across UK local authorities."
+    )
+    st.markdown("---")
+
+    # --- Region Selector ---
+    if areanm_col:
+        region_options = sorted(list(df_raw[areanm_col].dropna().unique()))
+        
+        # Default selection to Coventry if present, otherwise first option
+        default_index = 0
+        for i, opt in enumerate(region_options):
+            if "coventry" in str(opt).lower():
+                default_index = i
+                break
+
+        selected_region = st.selectbox(
+            "📍 Select Local Authority / Region to Inspect:",
+            options=region_options,
+            index=default_index,
+            help="Choose a single region from the dropdown to load its statistical profile and plot its charging points.",
+        )
+
+        filtered_df = df_raw[df_raw[areanm_col] == selected_region].copy()
+    else:
+        selected_region = "All Regions"
+        filtered_df = df_raw.copy()
+
+    # Parse spatial coordinates
+    cols_lower = {col.lower(): col for col in filtered_df.columns}
     found_lat = next(
         (cols_lower[c] for c in ["latitude", "lat", "y"] if c in cols_lower), None
     )
@@ -123,100 +127,83 @@ try:
     )
 
     if found_lat and found_lon:
-        df_raw[found_lat] = pd.to_numeric(df_raw[found_lat], errors="coerce")
-        df_raw[found_lon] = pd.to_numeric(df_raw[found_lon], errors="coerce")
-        df_raw = df_raw.dropna(subset=[found_lat, found_lon])
+        filtered_df[found_lat] = pd.to_numeric(filtered_df[found_lat], errors="coerce")
+        filtered_df[found_lon] = pd.to_numeric(filtered_df[found_lon], errors="coerce")
+        filtered_df = filtered_df.dropna(subset=[found_lat, found_lon])
         gdf = gpd.GeoDataFrame(
-            df_raw,
-            geometry=gpd.points_from_xy(df_raw[found_lon], df_raw[found_lat]),
+            filtered_df,
+            geometry=gpd.points_from_xy(filtered_df[found_lon], filtered_df[found_lat]),
             crs="EPSG:4326",
         )
     elif code_col:
-        df_raw["areacd_clean"] = df_raw[code_col].astype(str).str.upper()
-        df_raw["latitude"] = df_raw["areacd_clean"].map(
+        filtered_df["areacd_clean"] = filtered_df[code_col].astype(str).str.upper()
+        filtered_df["latitude"] = filtered_df["areacd_clean"].map(
             lambda x: ONS_LA_CENTROIDS[x][0] if x in ONS_LA_CENTROIDS else 52.5
         )
-        df_raw["longitude"] = df_raw["areacd_clean"].map(
+        filtered_df["longitude"] = filtered_df["areacd_clean"].map(
             lambda x: ONS_LA_CENTROIDS[x][1] if x in ONS_LA_CENTROIDS else -1.5
         )
         gdf = gpd.GeoDataFrame(
-            df_raw,
-            geometry=gpd.points_from_xy(df_raw["longitude"], df_raw["latitude"]),
+            filtered_df,
+            geometry=gpd.points_from_xy(filtered_df["longitude"], filtered_df["latitude"]),
             crs="EPSG:4326",
         )
     else:
-        st.error("Could not locate point coordinates or area codes in the dataset.")
+        st.error("Could not parse coordinates or area codes in the dataset.")
         st.stop()
 
-    # Create mapping of Raw Header -> Plain English Label
-    friendly_cols_map = {col: get_friendly_label(col) for col in gdf.columns if col != "geometry"}
-
-    # --- Interactive Filtering Bar (Excludes period / time columns) ---
-    group_cols = [
-        c for c in gdf.select_dtypes(include=["object"]).columns 
-        if c.lower() not in ["geometry", "areacd_clean", "period", "year", "time"]
+    # --- Regional Profile Summary Box ---
+    st.markdown(f"### 📊 Regional Profile: **{selected_region}**")
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Selected Region", selected_region)
+    
+    num_cols = [
+        c
+        for c in gdf.select_dtypes(include=["number"]).columns
+        if c.lower() not in ["latitude", "longitude", "lat", "lon"]
     ]
-
-    col_f1, col_f2 = st.columns([1, 2])
-
-    if group_cols:
-        with col_f1:
-            selected_raw_attribute = st.selectbox(
-                "Filter Category",
-                group_cols,
-                format_func=lambda x: friendly_cols_map.get(x, x),
-            )
-        with col_f2:
-            unique_vals = ["All Locations / Categories"] + sorted(
-                list(gdf[selected_raw_attribute].unique())
-            )
-            selected_val = st.selectbox("Select Specific Region or Value", unique_vals)
-
-        if selected_val != "All Locations / Categories":
-            filtered_gdf = gdf[gdf[selected_raw_attribute] == selected_val]
-        else:
-            filtered_gdf = gdf.copy()
+    
+    if num_cols:
+        m2.metric(f"Total {num_cols[0].replace('_', ' ').title()}", f"{gdf[num_cols[0]].sum():,.0f}")
+        m3.metric(f"Average per Location", f"{gdf[num_cols[0]].mean():.1f}")
     else:
-        filtered_gdf = gdf.copy()
-        selected_val = "All Data"
+        m2.metric("Mapped Locations Count", f"{len(gdf):,}")
+        m3.metric("Data Source", "DfT Public Dataset")
 
     st.markdown("---")
 
-    # --- Main Visual Dashboard Layout ---
-    col_map, col_analytics = st.columns([3, 2])
+    # --- Interactive Map & Local Records Table ---
+    col_map, col_table = st.columns([3, 2])
 
-    # --- 1. Interactive Spatial Map ---
     with col_map:
-        st.subheader("🗺️ Geographic Charging Point Locations")
+        st.subheader(f"🗺️ Charging Points in {selected_region}")
 
-        if not filtered_gdf.empty:
-            centroid = [filtered_gdf.geometry.y.mean(), filtered_gdf.geometry.x.mean()]
+        if not gdf.empty:
+            region_center = [gdf.geometry.y.mean(), gdf.geometry.x.mean()]
             m = folium.Map(
-                location=centroid,
-                zoom_start=9 if selected_val != "All Locations / Categories" else 6,
+                location=region_center,
+                zoom_start=11,
                 tiles=map_style,
                 control_scale=True,
             )
 
-            point_gdf = filtered_gdf[filtered_gdf.geometry.geom_type == "Point"]
-            coords = [[point.y, point.x] for point in point_gdf.geometry]
+            coords = [[p.y, p.x] for p in gdf.geometry]
 
             if map_mode == "Density Heatmap":
-                HeatMap(
-                    coords, radius=heatmap_radius, blur=15, min_opacity=0.4
-                ).add_to(m)
+                HeatMap(coords, radius=18, blur=15, min_opacity=0.4).add_to(m)
             else:
                 marker_cluster = MarkerCluster().add_to(m)
                 popup_cols = [
-                    c for c in filtered_gdf.columns 
-                    if c.lower() not in ["geometry", "areacd_clean", "latitude", "longitude", "period", "year", "time"]
+                    c for c in gdf.columns if c.lower() not in ["geometry", "latitude", "longitude"]
                 ][:4]
 
-                for idx, row in point_gdf.head(1500).iterrows():
+                for idx, row in gdf.head(1000).iterrows():
                     popup_html = "<div style='font-family: sans-serif; font-size: 12px;'>"
+                    popup_html += f"<b>Region:</b> {selected_region}<br>"
                     popup_html += "".join(
                         [
-                            f"<b>{friendly_cols_map.get(col, col)}:</b> {row[col]}<br>"
+                            f"<b>{col.replace('_', ' ').title()}:</b> {row[col]}<br>"
                             for col in popup_cols
                         ]
                     )
@@ -224,7 +211,7 @@ try:
 
                     folium.CircleMarker(
                         location=[row.geometry.y, row.geometry.x],
-                        radius=5,
+                        radius=6,
                         color="#005A9C",
                         fill=True,
                         fill_color="#0080FF",
@@ -232,61 +219,26 @@ try:
                         popup=folium.Popup(popup_html, max_width=250),
                     ).add_to(marker_cluster)
 
-            st_folium(m, use_container_width=True, height=520)
+            st_folium(m, use_container_width=True, height=500)
 
-    # --- 2. Dynamic Charts ---
-    with col_analytics:
-        st.subheader("📊 Visual Distribution Analytics")
+    with col_table:
+        st.subheader("📋 Local Data Inspection")
+        
+        preview_df = gdf.drop(columns=["geometry", "areacd_clean"], errors="ignore")
+        st.dataframe(
+            preview_df,
+            use_container_width=True,
+            height=380,
+        )
 
-        # Visual Chart 1: Bar Chart breakdown
-        if group_cols:
-            cat_counts = (
-                filtered_gdf[selected_raw_attribute]
-                .value_counts()
-                .head(10)
-                .reset_index()
-            )
-            friendly_name = friendly_cols_map.get(selected_raw_attribute, selected_raw_attribute)
-            cat_counts.columns = [friendly_name, "Device Count"]
-
-            fig_bar = px.bar(
-                cat_counts,
-                x="Device Count",
-                y=friendly_name,
-                orientation="h",
-                title=f"Top 10 Locations by '{friendly_name}'",
-                color="Device Count",
-                color_continuous_scale=color_theme,
-            )
-            fig_bar.update_layout(
-                yaxis={"categoryorder": "total ascending"},
-                height=250,
-                margin=dict(l=10, r=10, t=35, b=10),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        # Visual Chart 2: Donut Chart breakdown
-        if len(group_cols) > 1:
-            sec_col = (
-                group_cols[1]
-                if group_cols[1] != selected_raw_attribute
-                else group_cols[0]
-            )
-            friendly_sec_name = friendly_cols_map.get(sec_col, sec_col)
-            
-            pie_data = filtered_gdf.head(200).rename(columns=friendly_cols_map)
-            
-            fig_pie = px.pie(
-                pie_data,
-                names=friendly_sec_name,
-                title=f"Proportional Share by '{friendly_sec_name}'",
-                hole=0.4,
-                color_discrete_sequence=px.colors.sequential.Blues_r,
-            )
-            fig_pie.update_layout(
-                height=240, margin=dict(l=10, r=10, t=35, b=10)
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
+        geojson_bytes = gdf.to_crs("EPSG:4326").to_json()
+        st.download_button(
+            label=f"📥 Export {selected_region} Data (GeoJSON)",
+            data=geojson_bytes,
+            file_name=f"{selected_region.lower().replace(' ', '_')}_ev_data.geojson",
+            mime="application/geo+json",
+            use_container_width=True,
+        )
 
 except Exception as e:
-    st.error(f"Visualization Error: {str(e)}")
+    st.error(f"App Execution Error: {str(e)}")
