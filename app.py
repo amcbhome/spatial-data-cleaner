@@ -2,33 +2,19 @@ import folium
 from folium.plugins import HeatMap, MarkerCluster
 import geopandas as gpd
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 from streamlit_folium import st_folium
 
-# --- Page Setup ---
+# --- Page Configuration ---
 st.set_page_config(
-    page_title="Public EV Charging Infrastructure Explorer",
+    page_title="Department for Transport EV Charging Explorer",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# --- Raw GitHub Dataset URL ---
 DEFAULT_GITHUB_URL = "https://raw.githubusercontent.com/amcbhome/spatial-data-cleaner/main/electric-vehicle-public-charging-devices.csv"
 
-# --- Plain Language Mapping ---
-LABEL_MAP = {
-    "areacd": "Area Code",
-    "ladcd": "Area Code",
-    "gss_code": "Area Code",
-    "areanm": "Local Authority Name",
-    "ladnm": "Local Authority Name",
-    "region": "Region / Nation",
-    "value": "Total Charging Devices",
-}
-
-# --- ONS Centroid Lookup Table ---
+# Centroid lookup for fallback area-code mapping
 ONS_LA_CENTROIDS = {
     "W06000024": (51.7480, -3.3780),  # Merthyr Tydfil
     "E06000001": (54.6860, -1.2130),  # Hartlepool
@@ -51,7 +37,14 @@ def load_dataset(url: str) -> pd.DataFrame:
     return pd.read_csv(url)
 
 
-# --- Sidebar Map Controls ---
+# --- Header Relevant to Dataset ---
+st.title("⚡ Department for Transport Public EV Charging Infrastructure Explorer")
+st.caption(
+    "Interactive spatial analytics dashboard for exploring public electric vehicle charging device distribution across UK local authorities."
+)
+st.markdown("---")
+
+# --- Sidebar Controls ---
 st.sidebar.title("🎨 Map Controls")
 map_style = st.sidebar.selectbox(
     "Basemap Theme",
@@ -64,43 +57,36 @@ map_mode = st.sidebar.radio(
     index=0,
 )
 
-# --- Load Dataset ---
+# --- Load & Parse Data ---
 try:
     df_raw = load_dataset(DEFAULT_GITHUB_URL)
 
-    # Detect area name column
+    # Detect region or local authority name column
     areanm_col = next(
         (
             c
             for c in df_raw.columns
-            if c.lower() in ["areanm", "ladnm", "local_authority_name", "region"]
+            if c.lower()
+            in ["areanm", "ladnm", "local_authority_name", "region", "areacd"]
         ),
         None,
     )
 
-    # Page Header Relevant to Dataset
-    st.title("⚡ Department for Transport Public EV Charging Infrastructure Explorer")
-    st.caption(
-        "Interactive spatial dashboard for inspecting public electric vehicle charging device distribution across UK local authorities."
-    )
-    st.markdown("---")
-
-    # --- Region Selector ---
     if areanm_col:
         region_options = sorted(list(df_raw[areanm_col].dropna().unique()))
-        
-        # Default selection to Coventry if present, otherwise first option
-        default_index = 0
+
+        # Default to Coventry if present
+        default_idx = 0
         for i, opt in enumerate(region_options):
             if "coventry" in str(opt).lower():
-                default_index = i
+                default_idx = i
                 break
 
         selected_region = st.selectbox(
-            "📍 Select Local Authority / Region to Inspect:",
+            "📍 Select Local Authority / Region:",
             options=region_options,
-            index=default_index,
-            help="Choose a single region from the dropdown to load its statistical profile and plot its charging points.",
+            index=default_idx,
+            help="Selecting a region updates both the summary metrics and forces the map to re-center over that specific area code.",
         )
 
         filtered_df = df_raw[df_raw[areanm_col] == selected_region].copy()
@@ -127,16 +113,24 @@ try:
     )
 
     if found_lat and found_lon:
-        filtered_df[found_lat] = pd.to_numeric(filtered_df[found_lat], errors="coerce")
-        filtered_df[found_lon] = pd.to_numeric(filtered_df[found_lon], errors="coerce")
+        filtered_df[found_lat] = pd.to_numeric(
+            filtered_df[found_lat], errors="coerce"
+        )
+        filtered_df[found_lon] = pd.to_numeric(
+            filtered_df[found_lon], errors="coerce"
+        )
         filtered_df = filtered_df.dropna(subset=[found_lat, found_lon])
         gdf = gpd.GeoDataFrame(
             filtered_df,
-            geometry=gpd.points_from_xy(filtered_df[found_lon], filtered_df[found_lat]),
+            geometry=gpd.points_from_xy(
+                filtered_df[found_lon], filtered_df[found_lat]
+            ),
             crs="EPSG:4326",
         )
     elif code_col:
-        filtered_df["areacd_clean"] = filtered_df[code_col].astype(str).str.upper()
+        filtered_df["areacd_clean"] = (
+            filtered_df[code_col].astype(str).str.upper()
+        )
         filtered_df["latitude"] = filtered_df["areacd_clean"].map(
             lambda x: ONS_LA_CENTROIDS[x][0] if x in ONS_LA_CENTROIDS else 52.5
         )
@@ -145,44 +139,53 @@ try:
         )
         gdf = gpd.GeoDataFrame(
             filtered_df,
-            geometry=gpd.points_from_xy(filtered_df["longitude"], filtered_df["latitude"]),
+            geometry=gpd.points_from_xy(
+                filtered_df["longitude"], filtered_df["latitude"]
+            ),
             crs="EPSG:4326",
         )
     else:
-        st.error("Could not parse coordinates or area codes in the dataset.")
+        st.error("Could not parse coordinates or area codes in dataset.")
         st.stop()
 
-    # --- Regional Profile Summary Box ---
-    st.markdown(f"### 📊 Regional Profile: **{selected_region}**")
-    
+    # --- Regional Profile Summary ---
+    st.markdown(f"### 📊 Summary Profile: **{selected_region}**")
+
     m1, m2, m3 = st.columns(3)
-    m1.metric("Selected Region", selected_region)
-    
+    m1.metric("Selected Region", str(selected_region))
+
     num_cols = [
         c
         for c in gdf.select_dtypes(include=["number"]).columns
         if c.lower() not in ["latitude", "longitude", "lat", "lon"]
     ]
-    
+
     if num_cols:
-        m2.metric(f"Total {num_cols[0].replace('_', ' ').title()}", f"{gdf[num_cols[0]].sum():,.0f}")
-        m3.metric(f"Average per Location", f"{gdf[num_cols[0]].mean():.1f}")
+        m2.metric(
+            f"Total {num_cols[0].replace('_', ' ').title()}",
+            f"{gdf[num_cols[0]].sum():,.0f}",
+        )
+        m3.metric("Records Found", f"{len(gdf):,}")
     else:
-        m2.metric("Mapped Locations Count", f"{len(gdf):,}")
+        m2.metric("Mapped Locations", f"{len(gdf):,}")
         m3.metric("Data Source", "DfT Public Dataset")
 
     st.markdown("---")
 
-    # --- Interactive Map & Local Records Table ---
+    # --- Interactive Map Section ---
     col_map, col_table = st.columns([3, 2])
 
     with col_map:
         st.subheader(f"🗺️ Charging Points in {selected_region}")
 
         if not gdf.empty:
-            region_center = [gdf.geometry.y.mean(), gdf.geometry.x.mean()]
+            # 1. Calculate new center coordinates dynamically
+            lat_mean = float(gdf.geometry.y.mean())
+            lon_mean = float(gdf.geometry.x.mean())
+
+            # 2. Build fresh map instance
             m = folium.Map(
-                location=region_center,
+                location=[lat_mean, lon_mean],
                 zoom_start=11,
                 tiles=map_style,
                 control_scale=True,
@@ -195,11 +198,22 @@ try:
             else:
                 marker_cluster = MarkerCluster().add_to(m)
                 popup_cols = [
-                    c for c in gdf.columns if c.lower() not in ["geometry", "latitude", "longitude"]
+                    c
+                    for c in gdf.columns
+                    if c.lower()
+                    not in [
+                        "geometry",
+                        "latitude",
+                        "longitude",
+                        "period",
+                        "year",
+                    ]
                 ][:4]
 
                 for idx, row in gdf.head(1000).iterrows():
-                    popup_html = "<div style='font-family: sans-serif; font-size: 12px;'>"
+                    popup_html = (
+                        "<div style='font-family: sans-serif; font-size: 12px;'>"
+                    )
                     popup_html += f"<b>Region:</b> {selected_region}<br>"
                     popup_html += "".join(
                         [
@@ -219,12 +233,20 @@ try:
                         popup=folium.Popup(popup_html, max_width=250),
                     ).add_to(marker_cluster)
 
-            st_folium(m, use_container_width=True, height=500)
+            # 3. Force re-render on selection change using unique key
+            st_folium(
+                m,
+                use_container_width=True,
+                height=500,
+                key=f"map_render_{selected_region}",
+            )
 
     with col_table:
-        st.subheader("📋 Local Data Inspection")
-        
-        preview_df = gdf.drop(columns=["geometry", "areacd_clean"], errors="ignore")
+        st.subheader("📋 Region Data Inspection")
+
+        preview_df = gdf.drop(
+            columns=["geometry", "areacd_clean"], errors="ignore"
+        )
         st.dataframe(
             preview_df,
             use_container_width=True,
@@ -235,7 +257,7 @@ try:
         st.download_button(
             label=f"📥 Export {selected_region} Data (GeoJSON)",
             data=geojson_bytes,
-            file_name=f"{selected_region.lower().replace(' ', '_')}_ev_data.geojson",
+            file_name=f"{str(selected_region).lower().replace(' ', '_')}_ev_data.geojson",
             mime="application/geo+json",
             use_container_width=True,
         )
